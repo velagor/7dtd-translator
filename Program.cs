@@ -2,10 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Net.Http;
 using System.Text;
-using System.Text.Json;
-using System.Threading.Tasks;
 
 class Program
 {
@@ -20,12 +17,12 @@ class Program
         try { File.AppendAllText(logFile, line + Environment.NewLine, Encoding.UTF8); } catch { }
     }
 
-    static async Task Main(string[] args)
+    static void Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
         File.WriteAllText(logFile, "", Encoding.UTF8);
 
-        Log("=== 7DTD Translator ===");
+        Log("=== 7DTD Translator (ручной режим) ===");
         Log("");
 
         settings = LoadSettings();
@@ -42,8 +39,8 @@ class Program
             Console.WriteLine("--- МЕНЮ ---");
             Console.WriteLine("1. Настройки");
             Console.WriteLine("2. Разбить на части");
-            Console.WriteLine("3. Перевести через Ollama");
-            Console.WriteLine("4. Собрать обратно");
+            Console.WriteLine("3. Собрать обратно");
+            Console.WriteLine("4. Проверить части");
             Console.WriteLine("0. Выход");
             Console.Write("Выбор: ");
             string choice = Console.ReadLine()?.Trim() ?? "";
@@ -51,8 +48,8 @@ class Program
             if (choice == "0") break;
             if (choice == "1") EditSettings();
             else if (choice == "2") SplitToParts();
-            else if (choice == "3") await TranslateWithOllama();
-            else if (choice == "4") CollectBack();
+            else if (choice == "3") CollectBack();
+            else if (choice == "4") CheckParts();
         }
     }
 
@@ -63,7 +60,7 @@ class Program
             try
             {
                 var json = File.ReadAllText(settingsFile, Encoding.UTF8);
-                var s = JsonSerializer.Deserialize<Settings>(json);
+                var s = System.Text.Json.JsonSerializer.Deserialize<Settings>(json);
                 if (s != null) return s;
             }
             catch { }
@@ -73,7 +70,8 @@ class Program
 
     static void SaveSettings()
     {
-        var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
+        var json = System.Text.Json.JsonSerializer.Serialize(settings,
+            new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(settingsFile, json, Encoding.UTF8);
     }
 
@@ -89,14 +87,6 @@ class Program
         Console.Write($"Размер части [{settings.PartSize}]: ");
         v = Console.ReadLine()?.Trim() ?? "";
         if (int.TryParse(v, out int ps) && ps > 0) settings.PartSize = ps;
-
-        Console.Write($"Модель Ollama [{settings.OllamaModel}]: ");
-        v = Console.ReadLine()?.Trim() ?? "";
-        if (!string.IsNullOrWhiteSpace(v)) settings.OllamaModel = v;
-
-        Console.Write($"Адрес Ollama [{settings.OllamaUrl}]: ");
-        v = Console.ReadLine()?.Trim() ?? "";
-        if (!string.IsNullOrWhiteSpace(v)) settings.OllamaUrl = v;
 
         SaveSettings();
         Log("Настройки сохранены.");
@@ -128,24 +118,10 @@ class Program
         return result;
     }
 
-    static void SplitToParts()
+    static string Instruction()
     {
-        if (!Directory.Exists(settings.ModDir)) { Log("Папка мода не найдена."); return; }
-        string srcFile = Path.Combine(settings.ModDir, "Localization.csv");
-        if (!File.Exists(srcFile)) { Log("Localization.csv не найден."); return; }
-
-        var toTranslate = ReadToTranslate();
-        Log($"Строк для перевода: {toTranslate.Count}");
-
-        string partsDir = Path.Combine(settings.ModDir, "parts");
-        if (Directory.Exists(partsDir)) Directory.Delete(partsDir, true);
-        Directory.CreateDirectory(partsDir);
-
-        int partSize = settings.PartSize;
-        int totalParts = (toTranslate.Count + partSize - 1) / partSize;
-
-        string instruction = "=== ИНСТРУКЦИЯ ===\n" +
-            "Ты — переводчик. Переведи строки ниже с английского на русский.\n\n" +
+        return "=== ИНСТРУКЦИЯ ДЛЯ ПЕРЕВОДЧИКА ===\n" +
+            "Переведи строки между маркерами ниже с английского на русский.\n\n" +
             "Формат ответа строго такой:\n\n" +
             "1\nK: оригинальный Key\nR: перевод\n\n" +
             "2\nK: оригинальный Key\nR: перевод\n\n" +
@@ -157,12 +133,36 @@ class Program
             "- Сохраняй \\n там, где они были.\n" +
             "- Возвращай только формат: номер, K:, R:\n" +
             "- Не пиши пояснений.\n" +
-            "=== КОНЕЦ ИНСТРУКЦИИ ===\n\n";
+            "=== КОНЕЦ ИНСТРУКЦИИ ===\n\n" +
+            "### ПЕРЕВОДИТЬ ОТСЮДА ###\n";
+    }
+
+    static void SplitToParts()
+    {
+        if (!Directory.Exists(settings.ModDir)) { Log("Папка мода не найдена."); return; }
+        string srcFile = Path.Combine(settings.ModDir, "Localization.csv");
+        if (!File.Exists(srcFile)) { Log("Localization.csv не найден."); return; }
+
+        var toTranslate = ReadToTranslate();
+        Log($"Строк для перевода: {toTranslate.Count}");
+
+        string partsDir = Path.Combine(settings.ModDir, "parts");
+        if (Directory.Exists(partsDir))
+        {
+            Console.Write("Папка parts уже существует. Удалить? (y/n): ");
+            string a = Console.ReadLine()?.Trim().ToLower() ?? "n";
+            if (a != "y") { Log("Отменено."); return; }
+            Directory.Delete(partsDir, true);
+        }
+        Directory.CreateDirectory(partsDir);
+
+        int partSize = settings.PartSize;
+        int totalParts = (toTranslate.Count + partSize - 1) / partSize;
 
         for (int p = 0; p < totalParts; p++)
         {
             var sb = new StringBuilder();
-            sb.Append(instruction);
+            sb.Append(Instruction());
             int start = p * partSize;
             int end = Math.Min(start + partSize, toTranslate.Count);
             for (int i = start; i < end; i++)
@@ -173,6 +173,7 @@ class Program
                 sb.AppendLine("E: " + toTranslate[i].eng);
                 sb.AppendLine();
             }
+            sb.AppendLine("### ПЕРЕВОДИТЬ ДО СЮДА ###");
             string fname = Path.Combine(partsDir, $"part_{p + 1:D3}.txt");
             File.WriteAllText(fname, sb.ToString(), new UTF8Encoding(false));
         }
@@ -180,15 +181,12 @@ class Program
         Log($"Готово. Создано частей: {totalParts}. Папка: {partsDir}");
     }
 
-    static void CollectBack()
+    static Dictionary<string, string> ReadTranslationsFromParts()
     {
-        if (!Directory.Exists(settings.ModDir)) { Log("Папка мода не найдена."); return; }
-        string srcFile = Path.Combine(settings.ModDir, "Localization.csv");
-        string partsDir = Path.Combine(settings.ModDir, "parts");
-        if (!File.Exists(srcFile)) { Log("Localization.csv не найден."); return; }
-        if (!Directory.Exists(partsDir)) { Log("Папка parts не найдена."); return; }
-
         var translations = new Dictionary<string, string>();
+        string partsDir = Path.Combine(settings.ModDir, "parts");
+        if (!Directory.Exists(partsDir)) return translations;
+
         foreach (var file in Directory.GetFiles(partsDir, "part_*.txt").OrderBy(x => x))
         {
             var lines = File.ReadAllLines(file, Encoding.UTF8);
@@ -201,8 +199,46 @@ class Program
                     translations[currentKey] = line.Substring(3).Trim();
                     currentKey = null;
                 }
+                else if (line.StartsWith("E: ")) currentKey = null;
             }
         }
+        return translations;
+    }
+
+    static void CheckParts()
+    {
+        if (!Directory.Exists(settings.ModDir)) { Log("Папка мода не найдена."); return; }
+        var toTranslate = ReadToTranslate();
+        var translations = ReadTranslationsFromParts();
+
+        int found = 0, missing = 0, extra = 0;
+        foreach (var (key, eng) in toTranslate)
+        {
+            if (translations.ContainsKey(key)) found++;
+            else missing++;
+        }
+
+        var originalKeys = new HashSet<string>(toTranslate.Select(x => x.key));
+        foreach (var k in translations.Keys)
+        {
+            if (!originalKeys.Contains(k)) extra++;
+        }
+
+        Log($"Всего строк для перевода: {toTranslate.Count}");
+        Log($"Переведено: {found}");
+        Log($"Не переведено: {missing}");
+        Log($"Лишних переводов (чужих Key): {extra}");
+        int pct = toTranslate.Count == 0 ? 0 : (found * 100 / toTranslate.Count);
+        Log($"Прогресс: {pct}%");
+    }
+
+    static void CollectBack()
+    {
+        if (!Directory.Exists(settings.ModDir)) { Log("Папка мода не найдена."); return; }
+        string srcFile = Path.Combine(settings.ModDir, "Localization.csv");
+        if (!File.Exists(srcFile)) { Log("Localization.csv не найден."); return; }
+
+        var translations = ReadTranslationsFromParts();
         Log($"Найдено переводов: {translations.Count}");
 
         var srcLines = File.ReadAllLines(srcFile, Encoding.UTF8);
@@ -214,6 +250,7 @@ class Program
         var outLines = new List<string>();
         outLines.Add(hasRussian ? srcLines[0] : srcLines[0] + ",russian");
 
+        int written = 0, skipped = 0;
         for (int i = 1; i < srcLines.Length; i++)
         {
             if (string.IsNullOrWhiteSpace(srcLines[i])) { outLines.Add(srcLines[i]); continue; }
@@ -229,146 +266,19 @@ class Program
                     outLines.Add(JoinCsvLine(f));
                 }
                 else outLines.Add(srcLines[i] + "," + EscapeCsv(translations[key]));
+                written++;
             }
-            else outLines.Add(srcLines[i]);
+            else
+            {
+                outLines.Add(srcLines[i]);
+                skipped++;
+            }
         }
 
         string outFile = Path.Combine(settings.ModDir, "translated.csv");
         File.WriteAllLines(outFile, outLines, new UTF8Encoding(false));
-        Log($"Готово. Результат: {outFile}");
-    }
-
-    static async Task TranslateWithOllama()
-    {
-        if (!Directory.Exists(settings.ModDir)) { Log("Папка мода не найдена."); return; }
-        string srcFile = Path.Combine(settings.ModDir, "Localization.csv");
-        if (!File.Exists(srcFile)) { Log("Localization.csv не найден."); return; }
-
-        // Проверка Ollama
-        Log("Проверяю Ollama...");
-        using (var check = new HttpClient())
-        {
-            check.Timeout = TimeSpan.FromSeconds(10);
-            try
-            {
-                var r = await check.GetAsync(settings.OllamaUrl + "/api/tags");
-                if (!r.IsSuccessStatusCode) { Log($"Ollama вернула {r.StatusCode}. Выход."); return; }
-                Log("Ollama отвечает.");
-            }
-            catch (Exception ex)
-            {
-                Log("Ollama не отвечает: " + ex.Message);
-                return;
-            }
-        }
-
-        var toTranslate = ReadToTranslate();
-        Log($"Строк для перевода: {toTranslate.Count}");
-
-        int totalBatches = (toTranslate.Count + 19) / 20;
-        Log($"Всего пакетов: {totalBatches}");
-        Console.Write($"Сколько пакетов перевести? (1-{totalBatches}, all, или 1,2,3): ");
-        string answer = Console.ReadLine()?.Trim().ToLower() ?? "all";
-
-        var batchesToDo = new List<int>();
-        if (answer == "all" || answer == "")
-        {
-            for (int i = 0; i < totalBatches; i++) batchesToDo.Add(i);
-        }
-        else if (answer.Contains("-"))
-        {
-            var p = answer.Split('-');
-            if (int.TryParse(p[0], out int a) && int.TryParse(p[1], out int b))
-                for (int i = a; i <= b && i <= totalBatches; i++) batchesToDo.Add(i - 1);
-        }
-        else
-        {
-            foreach (var s in answer.Split(','))
-                if (int.TryParse(s.Trim(), out int n) && n >= 1 && n <= totalBatches) batchesToDo.Add(n - 1);
-        }
-
-        Log($"Будут переведены пакеты: {string.Join(",", batchesToDo.Select(x => x + 1))}");
-
-        var http = new HttpClient();
-        http.Timeout = TimeSpan.FromMinutes(5);
-        var translations = new Dictionary<string, string>();
-
-        foreach (int b in batchesToDo)
-        {
-            int start = b * 20;
-            int end = Math.Min(start + 20, toTranslate.Count);
-
-            var sb = new StringBuilder();
-            sb.AppendLine("Переведи строки с английского на русский. Формат:");
-            sb.AppendLine("1");
-            sb.AppendLine("K: Key");
-            sb.AppendLine("R: перевод");
-            sb.AppendLine();
-            for (int i = start; i < end; i++)
-            {
-                sb.AppendLine((i - start + 1).ToString());
-                sb.AppendLine("K: " + toTranslate[i].key);
-                sb.AppendLine("E: " + toTranslate[i].eng);
-                sb.AppendLine();
-            }
-
-            Log($"Пакет {b + 1}: отправляю {end - start} строк...");
-
-            var body = new
-            {
-                model = settings.OllamaModel,
-                prompt = sb.ToString(),
-                stream = false
-            };
-            var json = JsonSerializer.Serialize(body);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            try
-            {
-                var resp = await http.PostAsync(settings.OllamaUrl + "/api/generate", content);
-                if (!resp.IsSuccessStatusCode) { Log($"Пакет {b + 1}: ошибка {resp.StatusCode}"); continue; }
-                string respText = await resp.Content.ReadAsStringAsync();
-                using var doc = JsonDocument.Parse(respText);
-                string respAnswer = doc.RootElement.GetProperty("response").GetString() ?? "";
-
-                int got = 0;
-                var blocks = respAnswer.Split(new[] { "\n\n" }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (var block in blocks)
-                {
-                    var bl = block.Split('\n');
-                    string k = null, r = null;
-                    foreach (var l in bl)
-                    {
-                        if (l.StartsWith("K:")) k = l.Substring(2).Trim();
-                        else if (l.StartsWith("R:")) r = l.Substring(2).Trim();
-                    }
-                    if (k != null && r != null)
-                    {
-                        for (int i = start; i < end; i++)
-                        {
-                            if (toTranslate[i].key == k) { translations[toTranslate[i].key] = r; got++; break; }
-                        }
-                    }
-                }
-                Log($"Пакет {b + 1}: получено {got} из {end - start}");
-            }
-            catch (Exception ex)
-            {
-                Log($"Пакет {b + 1}: ошибка — {ex.Message}");
-            }
-        }
-
-        // Сохраняем в файл переводов, не в translated.csv
-        string outFile = Path.Combine(settings.ModDir, "ollama_translated.txt");
-        var sbOut = new StringBuilder();
-        foreach (var kv in translations)
-        {
-            sbOut.AppendLine("K: " + kv.Key);
-            sbOut.AppendLine("R: " + kv.Value);
-            sbOut.AppendLine();
-        }
-        File.WriteAllText(outFile, sbOut.ToString(), new UTF8Encoding(false));
-        Log($"Готово. Переводов: {translations.Count}. Файл: {outFile}");
+        Log($"Готово. Записано переводов: {written}. Без перевода: {skipped}.");
+        Log($"Результат: {outFile}");
     }
 
     static List<string> ParseCsvLine(string line)
@@ -422,7 +332,5 @@ class Program
 class Settings
 {
     public string ModDir { get; set; } = "";
-    public int PartSize { get; set; } = 100;
-    public string OllamaModel { get; set; } = "qwen3:8b";
-    public string OllamaUrl { get; set; } = "http://localhost:11434";
+    public int PartSize { get; set; } = 20;
 }
